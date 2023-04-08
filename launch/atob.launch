@@ -1,0 +1,3 @@
+<launch>
+	<node pkg="robofinal" type="gotob" name="MainNode" output="screen" />
+</launch>
