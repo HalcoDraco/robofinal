@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 
+
 //asumimos mapa de 384 * 384 con una resolucion de 0.05m por celda.
 //suponemos robot de 6*5 = 30cm de diametro
 const int map_side_lenght = 384;
