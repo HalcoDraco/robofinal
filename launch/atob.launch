@@ -1,3 +1,8 @@
 <launch>
 	<node pkg="robofinal" type="gotob" name="MainNode" output="screen" />
+	<include file="$(find turtlebot3_slam)/launch/turtlebot3_slam.launch">
+		<arg name="open_rviz" value="false"/>
+	</include>
+	<node pkg="rviz" type="rviz" name="rviz" required="true"
+          args="-d $(find robofinal)/rviz/visualization_rviz_turtlebot3.rviz"/>
 </launch>

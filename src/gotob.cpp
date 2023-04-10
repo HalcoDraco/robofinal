@@ -20,9 +20,10 @@ const int map_cell_zero_y = 200; //celda
 
 const int ort_cost = 10; //Coste de movimiento ortogonal
 const int diag_cost = 14; //Coste de movimiento diagonal
+const float heuristic_weight = 5.0; //Peso de la heuristica
 
-//suponemos robot de 6*5 = 30cm de diametro
-const int robot_cell_diameter = 6; //celda
+//suponemos robot de 8*5 = 40cm de diametro
+const int robot_cell_diameter = 8; //celda
 
 
 //Celdas del mapa
@@ -69,9 +70,9 @@ class AStarCell {
         AStarCell * parent; //Puntero a la celda padre
         int cell_x; //celda
         int cell_y; //celda
-        float g_cost; //coste al origen
-        float h_cost; //coste heuristico al destino (diagonal)
-        float f_cost; //g_cost + h_cost
+        int g_cost; //coste al origen
+        int h_cost; //coste heuristico al destino (diagonal)
+        float f_cost; //g_cost + heuristic_weight * h_cost
 
         //constructor por defecto
         AStarCell() {
@@ -102,8 +103,8 @@ class AStarCell {
             }
             
             //heuristica diagonal
-            int dx = std::round(abs(destiny_cell.x - x));
-            int dy = std::round(abs(destiny_cell.y - y));
+            int dx = abs(destiny_cell.x - x);
+            int dy = abs(destiny_cell.y - y);
             h_cost = (dx+dy)*ort_cost + (diag_cost-2*ort_cost) * std::min(dx, dy);
             
             //coste final
@@ -112,7 +113,7 @@ class AStarCell {
 
         //computa el coste final
         void computeFinalCost() {
-            f_cost = g_cost + h_cost;
+            f_cost = g_cost + h_cost * heuristic_weight;
         }
 
         //hace override del operador == para poder comparar dos objetos con == o usar algoritmos como std::find
@@ -135,6 +136,16 @@ class AStarCell {
         bool inVector(std::vector<AStarCell> &vector) {
             return getVectorIndex(vector) != -1;
         }
+        
+        //comprueba si la celda esta en un array
+        bool inArray(AStarCell * array, int array_size) {
+            for(int i = 0; i < array_size; i++) {
+                if(array[i] == *this) {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         //comprueba si el coste g es menor que el de otra celda
         bool lowerGCostThan(AStarCell &cell) {
@@ -144,8 +155,10 @@ class AStarCell {
 };
 
 //Lista de celdas cerradas del algoritmo A* con direcciones de memoria fijas
-AStarCell aStarFixedCellList[total_map_size];
-int aStarFixedCellListIndex = 0;
+AStarCell aStarClosed[total_map_size];
+
+//Indice de la lista de celdas cerradas del algoritmo A*
+int aStarClosedSize = 0;
 
 //Mapa de ocupacion con paredes agrandadas
 bool grid[total_map_size];
@@ -157,8 +170,8 @@ std::vector<AStarCell> path;
 bool canReach = true;
 
 //para visualizar, quitar para mejorar rendimiento
-ros::Publisher mp_pb;
-ros::Publisher p_pb;
+ros::Publisher map_pb;
+ros::Publisher path_pb;
 
 //Convierte un indice de array a una celda de grid
 GridCell translate_arr_to_grid(int index) {
@@ -235,33 +248,36 @@ int find_lowest_cost_ind(std::vector<AStarCell> &v) {
     int ind_min = 0;
 
     //recorre el vector buscando la celda con menor f_cost
+    int numfcost = 0;
     for(int i = 0; i < v.size(); i++) {
         if(v[i].f_cost < v[ind_min].f_cost) {
             ind_min = i;
 
         //si hay empate, se elige la celda con menor h_cost
         }else if(v[i].f_cost == v[ind_min].f_cost) {
+            numfcost++;
             if(v[i].h_cost < v[ind_min].h_cost) {
                 ind_min = i;
             }
         }
     }
+
     return ind_min;
 }
 
 //Añade un vecino a la lista de vecinos si es valido
-void assignValidNeighbour(int temp_x, int temp_y, AStarCell &parent, std::vector<AStarCell> &closed, std::vector<AStarCell> &neighbours) {
+void assignValidNeighbour(int temp_x, int temp_y, AStarCell &parent, std::vector<AStarCell> &neighbours) {
 
     AStarCell temp = AStarCell(temp_x, temp_y, &parent);
 
     //si la celda es valida, se añade a la lista de vecinos
-    if(temp_x >= 0 && temp_x < map_side_lenght && temp_y >= 0 && temp_y < map_side_lenght && grid[translate_grid_to_arr(GridCell(temp_x, temp_y))] == false && temp.inVector(closed) == false) {
+    if(temp_x >= 0 && temp_x < map_side_lenght && temp_y >= 0 && temp_y < map_side_lenght && grid[translate_grid_to_arr(GridCell(temp_x, temp_y))] == false && temp.inArray(aStarClosed, aStarClosedSize) == false) {
         neighbours.push_back(AStarCell(temp_x, temp_y, &parent));
     }
 }
 
 //Obtiene los vecinos validos de una celda
-std::vector<AStarCell> find_neighbours(AStarCell &ini, std::vector<AStarCell> &closed) {
+std::vector<AStarCell> find_neighbours(AStarCell &ini) {
     
     std::vector<AStarCell> neighbours;
     int temp_x, temp_y;
@@ -273,7 +289,7 @@ std::vector<AStarCell> find_neighbours(AStarCell &ini, std::vector<AStarCell> &c
         if(!(temp_x == ini.cell_x && temp_y == ini.cell_y)) {
 
             //si es valido, se añade a la lista de vecinos
-            assignValidNeighbour(temp_x, temp_y, ini, closed, neighbours);
+            assignValidNeighbour(temp_x, temp_y, ini, neighbours);
         }
     }
 
@@ -290,109 +306,175 @@ void setPath(AStarCell * end) {
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+//Publica el mapa de ocupacion de paredes agrandadas
+void mapPublication() {
+    nav_msgs::OccupancyGrid mp;
+    std::vector<int8_t> v(grid, grid + total_map_size);
+    for (int ind = 0; ind < total_map_size; ind++) {
+        v[ind] = v[ind] * 100;
+    }
+    mp.data = v;
+    mp.info.height = map_side_lenght;
+    mp.info.width = map_side_lenght;
+    mp.info.resolution = resolution;
+    mp.info.origin.position.x = map_origin_x;
+    mp.info.origin.position.y = map_origin_y;
+    
+    map_pb.publish(mp);
+}
+
+void pathPublication() {
+    nav_msgs::Path pth;
+
+    for(int i = 0; i < path.size(); i++) {
+        geometry_msgs::PoseStamped positionStamped;
+        positionStamped.pose.position.x = (path[i].cell_x - map_cell_zero_x)*resolution;
+        positionStamped.pose.position.y = (path[i].cell_y - map_cell_zero_y)*resolution;
+        pth.poses.push_back(positionStamped);
+    }
+
+    pth.header.frame_id = "map";
+    
+    path_pb.publish(pth);
+}
+
+//Visualiza el algoritmo A* en el mapa de ocupacion, solo para pruebas
+void aStarVisualization(int x, int y) {
+
+    const int intervalo_pub = 10;
+
+    grid[translate_grid_to_arr(GridCell(x, y))] = true;
+
+    if(aStarClosedSize % intervalo_pub == 0){
+        mapPublication();        
+    }
+}
+
+//Encuentra la celda libre mas cercana a la celda inicial
+void findNearestFreeCell(std::vector<AStarCell> &open, AStarCell &start) {
+
+    //Busca en 8 direcciones
+    GridCell directions[8] = {GridCell(1, 0), GridCell(1, 1), GridCell(0, 1), GridCell(-1, 1), GridCell(-1, 0), GridCell(-1, -1), GridCell(0, -1), GridCell(1, -1)};
+    int dist = 1;
+    bool found = false;
+    int i;
+    while(!found) {
+        for(i = 0; i < 8; i++) {
+            if(grid[translate_grid_to_arr(GridCell(start.cell_x + dist*directions[i].x, start.cell_y + dist*directions[i].y))] == false) {
+                found = true;
+                break;
+            }
+        }
+        if(!found){
+            dist++;
+        }
+    }
+
+    aStarClosed[aStarClosedSize] = start; 
+    AStarCell * parent = &aStarClosed[aStarClosedSize];
+    aStarClosedSize++;
+
+    for(int j = 1; j < dist; j++) {
+        aStarClosed[aStarClosedSize] = AStarCell(start.cell_x + j*directions[i].x, start.cell_y + j*directions[i].y, parent);
+        parent = &aStarClosed[aStarClosedSize];
+        aStarClosedSize++;     
+    }
+    open.push_back(AStarCell(start.cell_x + dist*directions[i].x, start.cell_y + dist*directions[i].y, parent));
+    
+
+}
 
 void astar(AStarCell start, AStarCell end) {
-    // OPEN //the set of nodes to be evaluated
-    std::vector<AStarCell> open;
-    // CLOSED //the set of nodes already evaluated
-    std::vector<AStarCell> closed;
-    // add the start node to OPEN
-    open.push_back(start);
-    // loop
 
+    if(grid[translate_grid_to_arr(GridCell(end.cell_x, end.cell_y))] == true) {
+        ROS_INFO("No hay camino o el destino esta demasiado cerca de una pared");
+        canReach = false;
+        return;
+    }
+
+    //Vector open, que contiene los nodos que se van a explorar (los de la frontera)
+    std::vector<AStarCell> open;
+
+    //Vaciar el vector de nodos cerrados
+    aStarClosedSize = 0;
+
+    if(grid[translate_grid_to_arr(GridCell(start.cell_x, start.cell_y))] == true) {
+        //Si el nodo inicial esta en una pared, se busca el nodo libre mas cercano
+        findNearestFreeCell(open, start);
+    }else {
+        //Se añade el nodo inicial a la lista de nodos a explorar
+        open.push_back(start);
+    }
+    
+
+    //Indice del nodo actual, definido fuera del bucle por eficiencia
     int ind_current;
+
+    //Mientras no se llegue al destino y no se agoten los nodos a explorar
     while(true) {
+        //Si no quedan nodos por explorar, no hay camino
         if(open.size() == 0) {
             //no hay camino
             canReach = false;
             ROS_INFO("No hay camino");
             break;
         }
-    // current = node in OPEN with the lowest cost
+
+        //Se obtiene el indice del nodo con menor f_cost de la lista de nodos a explorar
         ind_current = find_lowest_cost_ind(open);
 
-        //ROS_INFO("ind_current: %d", ind_current);
+        //Se copia el nodo actual a la lista fija de nodos cerrados para que no cambie su direccion de memoria a lo largo del algoritmo
+        aStarClosed[aStarClosedSize] = open[ind_current];
 
-        aStarFixedCellList[aStarFixedCellListIndex] = open[ind_current];
-        AStarCell * current = &(aStarFixedCellList[aStarFixedCellListIndex]);
-        aStarFixedCellListIndex++;
-        /*
-        ROS_INFO("globalind: %d", globalind);
-        ROS_INFO("current: %d, %d", current->cell_x, current->cell_y);
-        ROS_INFO("destiny: %f, %f", destiny.x, destiny.y);
-        ROS_INFO("opensize: %lu", open.size());
-        */
-    // remove current from OPEN
+        //Se obtiene la direccion de memoria del nodo actual
+        AStarCell * current = &(aStarClosed[aStarClosedSize]);
+
+        //Se visualiza el algoritmo A* en el mapa de ocupacion, solo para pruebas
+        //aStarVisualization(current->cell_x, current->cell_y);
+
+        //Se incrementa el indice de la lista fija de nodos para que no sobreescriba el nodo actual
+        aStarClosedSize++;
+
+        //Se elimina el nodo actual de la lista de nodos a explorar
         open.erase(open.begin() + ind_current);
-    // add current to CLOSED
-        closed.push_back(*current);
 
-
-
-
-        
-
-
-/*
-        grid[translate_grid_to_arr(GridCell(current->cell_x, current->cell_y))] = true;
-        ROS_INFO("current: %d, %d", current->cell_x, current->cell_y);
-        if(aStarFixedCellListIndex%10 == 0){
-            nav_msgs::OccupancyGrid mimapa;
-            std::vector<int8_t> v(grid, grid + sizeof(grid) / sizeof(grid[0]));
-            for (int ind = 0; ind < map_side_lenght*map_side_lenght; ind++) {
-                v[ind] = v[ind] * 100;
-            }
-            mimapa.data = v;
-            mimapa.info.height = map_side_lenght;
-            mimapa.info.width = map_side_lenght;
-            mimapa.info.resolution = 0.05;
-            mimapa.info.origin.position.x = -10;
-            mimapa.info.origin.position.y = -10;
-            
-            mp_pb.publish(mimapa);
-        }
-
-*/
-
-    // if current is the end node, path has been found
+        //Si el nodo actual es el destino, se ha encontrado el camino
         if(*current == end) {
 
-            //compute path
+            //Se calcula y asigna el camino
             path.clear();
-            //ROS_INFO("pathsize1: %lu", path.size());
             setPath(current);
-            //ROS_INFO("pathsize2: %lu", path.size());
-            //ROS_INFO("globalind: %d", globalind);
-            aStarFixedCellListIndex = 0;
-            //ROS_INFO("end set path");
             break;
         }
 
-    // for each neighbour of the current node
-        std::vector<AStarCell> neighbours = find_neighbours(*current, closed);
-        //ROS_INFO ("neighbours: %lu", neighbours.size());
+        //Se obtienen los vecinos del nodo actual
+        std::vector<AStarCell> neighbours = find_neighbours(*current);
+
         for(AStarCell neighbour : neighbours) {
-            if (!neighbour.inVector(open) || neighbour.lowerGCostThan(open[neighbour.getVectorIndex(open)])){
 
-                if(neighbour.inVector(open)) {
-                    AStarCell * n = &open[neighbour.getVectorIndex(open)];
-                    n->g_cost = neighbour.g_cost;
-                    n->parent = current;
-                    n->computeFinalCost();
-                } else {
-                    open.push_back(neighbour);
-                }
-           
-            }
-            
-        
+            //Encuentra la posicion del vecino en el vector open, si no esta devuelve -1
+            int ind_in_open = neighbour.getVectorIndex(open);
+
+            //Si el vecino no esta en la lista de nodos a explorar
+            if(ind_in_open == -1) {
+
+                //Se añade a la lista de nodos a explorar
+                open.push_back(neighbour);
+
+            //Si el vecino ya esta en la lista de nodos a explorar, pero tiene un g_cost inferior al que tiene ahora
+            } else if (neighbour.lowerGCostThan(open[ind_in_open])){
+
+                //Se actualizan los valores
+                open[ind_in_open].g_cost = neighbour.g_cost;
+                open[ind_in_open].parent = current;
+                open[ind_in_open].computeFinalCost();
+
+            }   
         }
-
     }
 }
 
-
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     memset(grid, 0, sizeof(grid));
@@ -404,55 +486,41 @@ void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     destiny_cell.changePos(destiny_meters);
     astar(AStarCell((0 + 200), (0 + 200), NULL), AStarCell((20 + 200), (40 + 200), NULL));
     
-
     //mera visualizacion
-    nav_msgs::OccupancyGrid mimapa;
-    std::vector<int8_t> v(grid, grid + sizeof(grid) / sizeof(grid[0]));
-    for (int ind = 0; ind < map_side_lenght*map_side_lenght; ind++) {
-        v[ind] = v[ind] * 100;
-    }
-    mimapa.data = v;
-    mimapa.info.height = map_side_lenght;
-    mimapa.info.width = map_side_lenght;
-    mimapa.info.resolution = 0.05;
-    mimapa.info.origin = msg->info.origin;
-    
-    mp_pb.publish(mimapa);
-    ROS_INFO("publicando el mapa");
+    mapPublication();
+    pathPublication();
+}
 
-    nav_msgs::Path micamino;
-    geometry_msgs::PoseStamped miarray[path.size()];
-    for(int i = 0; i < path.size(); i++) {
-        geometry_msgs::PoseStamped pos;
-        pos.pose.position.x = (path[i].cell_x - 200) * 0.05;
-        pos.pose.position.y = (path[i].cell_y - 200) * 0.05;
-        miarray[i] = pos;
-    }
-    std::vector<geometry_msgs::PoseStamped> vec(miarray, miarray + sizeof(miarray) / sizeof(miarray[0]));
-    for(geometry_msgs::PoseStamped ps : vec) {
-        micamino.poses.push_back(ps);
-    }
-    micamino.header.frame_id = "map";
-    
-    p_pb.publish(micamino);
-    ROS_INFO("publicando el camino");
+void moveRobot() {
+    //TODO
 }
 
 int main(int argc, char **argv) {
 
+    //Inicializacion de ROS
     ros::init(argc, argv, "MainNode");
+
     ros::NodeHandle nh;
+
+    //Subscriber al mapa generado por gmapping
     ros::Subscriber sub_map = nh.subscribe("map", 1000, mapCallBack);
-    mp_pb = nh.advertise<nav_msgs::OccupancyGrid>("map_copia", 100);
-    p_pb = nh.advertise<nav_msgs::Path>("path_copia", 100);
-    
+
+    //Publisher del mapa ampliado
+    map_pb = nh.advertise<nav_msgs::OccupancyGrid>("big_wall_map", 100);
+
+    //Publisher del camino
+    path_pb = nh.advertise<nav_msgs::Path>("robot_path", 100);
     
 
     ros::Rate rate(50);
 
-    nh.setParam("/turtlebot3_slam_gmapping/map_update_interval", 3.0);
+    nh.setParam("/turtlebot3_slam_gmapping/map_update_interval", 2.0);
 
-    while(ros::ok()/* && canReach*/) {
+    //Recibe la informacion entrante de forma asincrona, sustituye a ros::spin()
+    ros::AsyncSpinner spinner(0);
+    spinner.start();
+
+    while(ros::ok() && canReach) {
 
         //estructura:
         // -leer mapa
@@ -460,12 +528,12 @@ int main(int argc, char **argv) {
         // -A*
         // -mover robot
 
-        ros::spinOnce();
         rate.sleep();
     }
 
-    ros::spin();
+    ROS_INFO("Fin del programa");
+
+    ros::waitForShutdown();
 
     return 0;
 }
-
