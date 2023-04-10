@@ -1,5 +1,11 @@
 <launch>
-	<node pkg="robofinal" type="gotob" name="MainNode" output="screen" />
+	<node pkg="robofinal" type="gotob" name="MainNode" output="screen"/>
+
+	<arg name="dest_x"/>
+	<arg name="dest_y"/>
+	<param name="destiny_x" value="$(arg dest_x)"/>
+	<param name="destiny_y" value="$(arg dest_y)"/>
+
 	<include file="$(find turtlebot3_slam)/launch/turtlebot3_slam.launch">
 		<arg name="open_rviz" value="false"/>
 	</include>
