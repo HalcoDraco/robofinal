@@ -12,6 +12,7 @@
 #include <vector>
 #include <mutex>
 
+const double PI = 3.14159265358979323846;
 
 //Por facilidad, asumimos un mapa de 384 * 384 con una resolucion de 0.05m por celda.
 const int map_side_lenght = 384; //celdas
@@ -25,10 +26,12 @@ const int map_cell_zero_y = 200; //celda
 
 const int ort_cost = 10; //Coste de movimiento ortogonal
 const int diag_cost = 14; //Coste de movimiento diagonal
-const float heuristic_weight = 2.5; //Peso de la heuristica
+const float heuristic_weight = 2.0; //Peso de la heuristica
 
-//suponemos robot de 8*5 = 40cm de diametro
-const int robot_cell_diameter = 8; //celda
+//suponemos robot de 10*5 = 50cm de diametro
+const int robot_cell_diameter = 10; //celda
+
+const int pathStepIndex = 2;
 
 
 //Celdas del mapa
@@ -168,12 +171,14 @@ int aStarClosedSize = 0;
 //El mutex asegura que solo un hilo puede acceder al path a la vez
 std::mutex pathMutex;
 
+std::mutex posMutex;
+
 //Mapa de ocupacion con paredes agrandadas
 bool grid[total_map_size];
 
 //Lista de celdas que conforman el camino
 std::vector<AStarCell> path;
-int pathIndex = 1;
+int pathIndex = pathStepIndex;
 
 //Indica si se ha encontrado un camino
 bool canReach = true;
@@ -459,7 +464,7 @@ void astar(AStarCell start, AStarCell end) {
             path.clear();
 
             //el index 0 contiene la posicion del robot
-            pathIndex = 1;
+            pathIndex = pathStepIndex;
             setPath(current);
             pathMutex.unlock();
             break;
@@ -496,6 +501,8 @@ void astar(AStarCell start, AStarCell end) {
 
 void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
 
+    std::lock_guard<std::mutex> lock(posMutex);
+
     current_pose.x = msg->pose.pose.position.x;
     current_pose.y = msg->pose.pose.position.y;
 
@@ -514,73 +521,129 @@ void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
 void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     memset(grid, 0, sizeof(grid));
     enlargeWalls(&(msg->data[0]));
-
-    GridCell curr_pos = GridCell(current_pose);
-    astar(AStarCell(curr_pos.x, curr_pos.y, NULL), AStarCell(destiny_cell.x, destiny_cell.y, NULL));
-    
+   
     //mera visualizacion
     mapPublication();
-    pathPublication();
 }
 
 //Publicar la velocidad lineal y angular
 ros::Publisher vel_pb;
 
 //Establecer velocidad lineal y angular iniciales
-geometry_msgs::Twist msg;
+geometry_msgs::Twist cmd_vel_msg;
 
 //Función para mover el robot en linea recta del punto incial (pose) al punto final (goal)
-void moveStraight(geometry_msgs::Pose2D goal, ros::Rate &rate) {
-    //Variable velocidad linear y angular
-    float linear_vel = 0.16;
-    float angular_vel = 0.75;
+void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
+    
+    float acc_time = 1.0;
+    float linear_vel = 0.10 / acc_time;
+    float angular_vel = 0.60 / acc_time;
+    float vel_mod;
 
-    //Calcular la distancia entre el punto inicial y el final
-    float initDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
+    posMutex.lock();
+    float dx = goal.x - current_pose.x;
+    float dy = goal.y - current_pose.y;
+    posMutex.unlock();
 
-    //Calcular el ángulo entre el punto inicial y el final
-    float angle = std::atan((goal.y - current_pose.y)/ (goal.x - current_pose.x));
-    ROS_INFO("angle: %f", angle);
+    float goal_angle = atan(dy/dx);
 
-    //Calcular el ángulo que debe girar el robot para alinear la dirección con el punto final
-    float angle_to_goal = angle - current_pose.theta;
-
-    //Bucle mientras el robot no haya rotado lo suficiente
-    while(std::abs(current_pose.theta - angle_to_goal) > 0.05) {
-       
-        //Si el ángulo angle_to_goal es positivo, el robot debe girar a la izquierda (sentido antihorario)
-        if(angle_to_goal > 0) {
-            //Girar el robot a la izquierda
-            msg.angular.z = angular_vel;
-            vel_pb.publish(msg);
-			rate.sleep();
-        }
-        //Si el ángulo angle_to_goal es negativo, el robot debe girar a la derecha (sentido horario)
-        else if (angle_to_goal < 0){
-            //Girar el robot a la derecha
-            msg.angular.z = -angular_vel;
-            vel_pb.publish(msg);
-			rate.sleep();
+    if (dx < 0) {
+        if(dy < 0) {
+            goal_angle = goal_angle - PI;
+        } else {
+            goal_angle = goal_angle + PI;
         }
     }
 
+    //Calcular el ángulo que debe girar el robot para alinear la dirección con el punto final
+    posMutex.lock();
+    float angle_dist = goal_angle - current_pose.theta;
+    posMutex.unlock();
+
+    int dir;
+
+    if(angle_dist >= 0) {
+        dir = 1;
+    }else {
+        dir = -1;
+    }
+
+    double initTime = ros::Time::now().toSec();
+    double actualTime = ros::Time::now().toSec();
+    //Bucle mientras el robot no haya rotado lo suficiente
+    while(std::abs(angle_dist) > 0.1) {
+
+        posMutex.lock();
+        angle_dist = goal_angle - current_pose.theta;
+        posMutex.unlock();
+
+        //aceleracion
+        actualTime = ros::Time::now().toSec();
+        if(actualTime - initTime < acc_time) {
+            vel_mod = actualTime - initTime;
+        }else {
+            vel_mod = acc_time;
+        }
+
+        //deceleracion
+        if(std::abs(angle_dist) < PI/2) {
+            vel_mod = vel_mod * std::abs(angle_dist) / (PI/2);
+        }
+
+        cmd_vel_msg.angular.z = dir*angular_vel*vel_mod;
+        vel_pb.publish(cmd_vel_msg);
+        rate.sleep();
+
+    }
+
     //Detener el robot
-    msg.angular.z = 0.0;
-    vel_pb.publish(msg);
-    
+    ROS_INFO("stop ang");
+    cmd_vel_msg.angular.z = 0.0;
+    vel_pb.publish(cmd_vel_msg);
+
+    posMutex.lock();
+    float initDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
+    posMutex.unlock();
+
     float actualDistance = initDistance;
-    //Bucle mientras el robot no haya llegado al punto final
-    while(actualDistance > 0.1 && actualDistance <= initDistance + 0.05) {
+    
+    initTime = ros::Time::now().toSec();
+    actualTime = ros::Time::now().toSec();
+
+    float min_dist = initDistance;
+
+    while(actualDistance > 0.03 && actualDistance <= min_dist + 0.01) {
+        posMutex.lock();
         actualDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
-        //Mover el robot hacia el punto final a una velocidad lineal constante de 0.16 m/s
-        msg.linear.x = linear_vel;
-        vel_pb.publish(msg);
+        posMutex.unlock();
+
+        if(actualDistance < min_dist) {
+            min_dist = actualDistance;
+        }
+        
+        ROS_INFO("actualdist: %f", actualDistance);
+        //aceleracion
+        actualTime = ros::Time::now().toSec();
+        if(actualTime - initTime < acc_time) {
+            vel_mod = actualTime - initTime;
+        }else {
+            vel_mod = acc_time;
+        }
+
+        //deceleracion
+        if(actualDistance < 0.05) {
+            vel_mod = vel_mod * actualDistance / 0.05;
+        }
+
+        cmd_vel_msg.linear.x = linear_vel*vel_mod;
+        vel_pb.publish(cmd_vel_msg);
 		rate.sleep();
     }
 
     //Detener el robot
-    msg.linear.x = 0.0;
-    vel_pb.publish(msg);
+    ROS_INFO("stop lin");
+    cmd_vel_msg.linear.x = 0.0;
+    vel_pb.publish(cmd_vel_msg);
 
 }
 
@@ -620,9 +683,18 @@ int main(int argc, char **argv) {
     ros::AsyncSpinner spinner(0);
     spinner.start();
 
+    ros::Duration(1.0).sleep();
     while(ros::ok() && canReach && !isDestinyReached) {
 
         ROS_INFO("entra al while");
+
+        posMutex.lock();
+        GridCell curr_pos = GridCell(current_pose);
+        posMutex.unlock();
+
+        astar(AStarCell(curr_pos.x, curr_pos.y, NULL), AStarCell(destiny_cell.x, destiny_cell.y, NULL));
+
+        pathPublication();
 
         pathMutex.lock();
 
@@ -631,10 +703,11 @@ int main(int argc, char **argv) {
             geometry_msgs::Pose2D tempGoal;
             tempGoal.x = (path[pathIndex].cell_x - map_cell_zero_x)*resolution;
             tempGoal.y = (path[pathIndex].cell_y - map_cell_zero_y)*resolution;
-            pathIndex++;
+            pathIndex += pathStepIndex;
 
             pathMutex.unlock();
 
+            ROS_INFO("goal_x, goal_y: %f, %f", tempGoal.x, tempGoal.y);
             moveStraight(tempGoal, rate);
         }else {
             pathMutex.unlock();
@@ -646,139 +719,7 @@ int main(int argc, char **argv) {
 
     ROS_INFO("Fin del programa");
 
-    ros::waitForShutdown();
+    ros::shutdown();
 
     return 0;
 }
-
-
-
-
-/*
-#include <ros/ros.h>
-#include <std_msgs/Int8.h>
-#include <nav_msgs/OccupancyGrid.h>
-#include <nav_msgs/Path.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <geometry_msgs/Pose2D.h>
-#include <nav_msgs/Odometry.h>
-#include <tf/tf.h>
-#include <geometry_msgs/Twist.h>
-#include <cmath>
-#include <cstring>
-#include <vector>
-
-
-geometry_msgs::Pose2D current_pose; 
-
-void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
-
-    current_pose.x = msg->pose.pose.position.x;
-    current_pose.y = msg->pose.pose.position.y;
-
-    tf::Quaternion q(
-        msg->pose.pose.orientation.x,
-        msg->pose.pose.orientation.y,
-        msg->pose.pose.orientation.z,
-        msg->pose.pose.orientation.w);
-
-    tf::Matrix3x3 m(q);
-    double roll, pitch, yaw;
-    m.getRPY(roll, pitch, yaw);
-    current_pose.theta = yaw;
-}
-
-ros::Publisher vel_pb;
-
-//Establecer velocidad lineal y angular iniciales
-geometry_msgs::Twist msg;
-
-void moveStraight(geometry_msgs::Pose2D goal, ros::Rate &rate) {
-    //Variable velocidad linear y angular
-    float linear_vel = 0.16;
-    float angular_vel = 0.20;
-
-    //Calcular la distancia entre el punto inicial y el final
-    float initDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
-
-    //Calcular el ángulo entre el punto inicial y el final
-    float angle = std::atan((goal.y - current_pose.y)/ (goal.x - current_pose.x));
-    ROS_INFO("angle: %f", angle);
-
-    //Calcular el ángulo que debe girar el robot para alinear la dirección con el punto final
-    float angle_to_goal = angle - current_pose.theta;
-
-    //Bucle mientras el robot no haya rotado lo suficiente
-    while(std::abs(current_pose.theta - angle_to_goal) > 0.1) {
-       
-        //Si el ángulo angle_to_goal es positivo, el robot debe girar a la izquierda (sentido antihorario)
-        if(angle_to_goal > 0) {
-            //Girar el robot a la izquierda
-            ROS_INFO("angleactual: %f", current_pose.theta);
-            msg.angular.z = angular_vel;
-            vel_pb.publish(msg);
-			rate.sleep();
-        }
-        //Si el ángulo angle_to_goal es negativo, el robot debe girar a la derecha (sentido horario)
-        else if (angle_to_goal < 0){
-            //Girar el robot a la derecha
-            msg.angular.z = -angular_vel;
-            vel_pb.publish(msg);
-			rate.sleep();
-        }
-    }
-
-    //Detener el robot
-    msg.angular.z = 0.0;
-    vel_pb.publish(msg);
-    
-    float actualDistance = initDistance;
-    //Bucle mientras el robot no haya llegado al punto final
-    while(actualDistance > 0.2 && actualDistance <= initDistance + 0.05) {
-        ROS_INFO("actualDistance: %f", actualDistance);
-        ROS_INFO("angleactual: %f", current_pose.theta);
-        actualDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
-        //Mover el robot hacia el punto final a una velocidad lineal constante de 0.16 m/s
-        msg.linear.x = linear_vel;
-        vel_pb.publish(msg);
-		rate.sleep();
-    }
-
-    //Detener el robot
-    msg.linear.x = 0.0;
-    vel_pb.publish(msg);
-
-}
-
-
-
-int main(int argc, char **argv) {
-
-    //Inicializacion de ROS
-    ros::init(argc, argv, "n");
-
-    ros::NodeHandle nh;
-
-    ros::Subscriber sub_odometry = nh.subscribe("odom", 1000, odomCallback);
-    
-    //Publisher de la velocidad
-    vel_pb = nh.advertise<geometry_msgs::Twist>("cmd_vel", 100);
-
-    ros::Rate rate(50);
-
-    ros::AsyncSpinner spinner(0);
-    spinner.start();
-
-    //nh.setParam("/turtlebot3_slam_gmapping/map_update_interval", 2.0);
-
-    geometry_msgs::Pose2D goal;
-    goal.x = 1.0;
-    goal.y = 2.0;
-
-    moveStraight(goal, rate);
-
-    ros::waitForShutdown();
-
-    return 0;
-}
-*/
