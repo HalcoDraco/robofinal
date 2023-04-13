@@ -18,7 +18,7 @@ const double PI = 3.14159265358979323846;
 const int map_side_lenght = 384; //celdas
 const int total_map_size = map_side_lenght * map_side_lenght; //celdas
 const float resolution = 0.05; //m/celda
-const int inv_resolution = 20; //celda/m
+const int inv_resolution = 20; //celda/m   //para trabajar con enteros en vez de floats (rendimiento)
 const int map_origin_x = -10; //m
 const int map_origin_y = -10; //m
 const int map_cell_zero_x = 200; //celda
@@ -31,7 +31,7 @@ const float heuristic_weight = 2.0; //Peso de la heuristica
 //suponemos robot de 10*5 = 50cm de diametro
 const int robot_cell_diameter = 10; //celda
 
-const int pathStepIndex = 2;
+const int pathStepIndex = 3;
 
 
 //Celdas del mapa
@@ -177,9 +177,6 @@ bool grid[total_map_size];
 
 //Lista de celdas que conforman el camino
 std::vector<AStarCell> path;
-
-//Indice de la celda actual del camino, se suma uno porque la primera celda es la del robot
-int pathIndex = pathStepIndex + 1;
 
 //Indica si se ha encontrado un camino
 bool canReach = true;
@@ -470,8 +467,6 @@ void astar(AStarCell start, AStarCell end) {
             //Se calcula y asigna el camino
             path.clear();
 
-            //el index 0 contiene la posicion del robot
-            pathIndex = pathStepIndex + 1;
             setPath(current);
             pathMutex.unlock();
             break;
@@ -541,25 +536,15 @@ void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
     mapPublication();
 }
 
-
-void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
-    
-    //Mensaje que se publicara en el topic cmd_vel
-    geometry_msgs::Twist cmd_vel_msg;
-
-
-    float acc_time = 0.5;
-    float linear_vel = 0.17 / acc_time;
-    float angular_vel = 0.80 / acc_time;
-    float vel_mod;
-
+float calculateGoalAngle(geometry_msgs::Pose2D &goal) {
+    //Obtiene las diferencias entre la posicion actual y la posicion final en x e y
     posMutex.lock();
     float dx = goal.x - current_pose.x;
     float dy = goal.y - current_pose.y;
     posMutex.unlock();
 
+    //Usando trigonometria y teniendo en cuenta la representacion de angulos de ros, se calcula el angulo que debe tener el robot para alinear la direccion con el punto final
     float goal_angle = atan(dy/dx);
-
     if (dx < 0) {
         if(dy < 0) {
             goal_angle = goal_angle - PI;
@@ -568,19 +553,46 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
         }
     }
 
-    //Calcular el ángulo que debe girar el robot para alinear la dirección con el punto final
+    return goal_angle;
+}
+
+float calculateAngleDistance(float goal_angle) {
+    //Calcular el ángulo que debe girar el robot
     posMutex.lock();
     float angle_dist = goal_angle - current_pose.theta;
     posMutex.unlock();
 
+    //Corregir el angulo si el giro es mayor de media vuelta
     if(angle_dist > PI) {
         angle_dist = angle_dist - 2*PI;
     } else if(angle_dist < -PI) {
         angle_dist = angle_dist + 2*PI;
     }
 
-    int dir;
+    return angle_dist;
+}
 
+void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
+    
+    //Mensaje que se publicara en el topic cmd_vel
+    geometry_msgs::Twist cmd_vel_msg;
+
+    float acc_time = 0.8;
+    float ang_dist_dec = PI/3;
+    float lin_dist_dec = 0.05;
+    float linear_vel = 0.14 / acc_time;
+    float angular_vel = 0.80 / acc_time;
+    float vel_mod;
+    float angle_precision = 0.05;
+
+    //Se calcula el angulo que debe tener el robot
+    float goal_angle = calculateGoalAngle(goal);
+
+    //Se calcula el angulo que debe rotar el robot para alinear la direccion con el punto final (en radianes)
+    float angle_dist = calculateAngleDistance(goal_angle);
+
+    //Se define la direccion del giro
+    int dir;
     if(angle_dist >= 0) {
         dir = 1;
     }else {
@@ -588,19 +600,12 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
     }
 
     double initTime = ros::Time::now().toSec();
-    double actualTime = ros::Time::now().toSec();
+    double actualTime;
+
     //Bucle mientras el robot no haya rotado lo suficiente
-    while(std::abs(angle_dist) > 0.1) {
+    while(std::abs(angle_dist) > angle_precision) {
 
-        posMutex.lock();
-        angle_dist = goal_angle - current_pose.theta;
-        posMutex.unlock();
-
-        if(angle_dist > PI) {
-            angle_dist = angle_dist - 2*PI;
-        } else if(angle_dist < -PI) {
-            angle_dist = angle_dist + 2*PI;
-        }
+        angle_dist = calculateAngleDistance(goal_angle);
 
         //aceleracion
         actualTime = ros::Time::now().toSec();
@@ -611,33 +616,31 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
         }
 
         //deceleracion
-        if(std::abs(angle_dist) < PI/2) {
-            vel_mod = vel_mod * std::abs(angle_dist) / (PI/2);
+        if(std::abs(angle_dist) < ang_dist_dec) {
+            vel_mod = vel_mod * std::abs(angle_dist) / ang_dist_dec;
         }
 
+        //Publicar velocidad angular
         cmd_vel_msg.angular.z = dir*angular_vel*vel_mod;
         vel_pb.publish(cmd_vel_msg);
         rate.sleep();
-
     }
 
     //Detener el robot
-    ROS_INFO("stop ang");
     cmd_vel_msg.angular.z = 0.0;
     vel_pb.publish(cmd_vel_msg);
 
     posMutex.lock();
-    float initDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
+    float actualDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
     posMutex.unlock();
 
-    float actualDistance = initDistance;
+    float min_dist = actualDistance;
     
     initTime = ros::Time::now().toSec();
-    actualTime = ros::Time::now().toSec();
 
-    float min_dist = initDistance;
+    //Mientras la distancia se vaya reduciendo con un margen de error de 1cm
+    while(actualDistance <= min_dist + 0.01) {
 
-    while(actualDistance > 0.03 && actualDistance <= min_dist + 0.01) {
         posMutex.lock();
         actualDistance = std::sqrt(std::pow(goal.x - current_pose.x, 2) + std::pow(goal.y - current_pose.y, 2));
         posMutex.unlock();
@@ -646,7 +649,6 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
             min_dist = actualDistance;
         }
         
-        ROS_INFO("actualdist: %f", actualDistance);
         //aceleracion
         actualTime = ros::Time::now().toSec();
         if(actualTime - initTime < acc_time) {
@@ -656,23 +658,21 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
         }
 
         //deceleracion
-        if(actualDistance < 0.05) {
-            vel_mod = vel_mod * actualDistance / 0.05;
+        if(actualDistance < lin_dist_dec) {
+            vel_mod = vel_mod * actualDistance / lin_dist_dec;
         }
 
+        //Publicar velocidad lineal
         cmd_vel_msg.linear.x = linear_vel*vel_mod;
         vel_pb.publish(cmd_vel_msg);
 		rate.sleep();
     }
 
     //Detener el robot
-    ROS_INFO("stop lin");
     cmd_vel_msg.linear.x = 0.0;
     vel_pb.publish(cmd_vel_msg);
 
 }
-
-
 
 int main(int argc, char **argv) {
 
@@ -681,6 +681,7 @@ int main(int argc, char **argv) {
 
     ros::NodeHandle nh;
 
+    //Obtiene las coordenadas del destino
     nh.getParam("destiny_x", destiny_meters.x);
     nh.getParam("destiny_y", destiny_meters.y);
 
@@ -689,6 +690,7 @@ int main(int argc, char **argv) {
     //Subscriber al mapa generado por gmapping
     ros::Subscriber sub_map = nh.subscribe("map", 1000, mapCallBack);
 
+    //Subscriber a la odometria
     ros::Subscriber sub_odometry = nh.subscribe("odom", 1000, odomCallback);
 
     //Publisher del mapa ampliado
@@ -700,45 +702,49 @@ int main(int argc, char **argv) {
     //Publisher de la velocidad
     vel_pb = nh.advertise<geometry_msgs::Twist>("cmd_vel", 100);
 
+    //Se establece una frecuencia de 60Hz
     ros::Rate rate(60);
 
-    //nh.setParam("/turtlebot3_slam_gmapping/map_update_interval", 2.0);
-
-    //Recibe la informacion entrante de forma asincrona, sustituye a ros::spin()
+    //Recibe la informacion entrante de forma asincrona, sustituye a ros::spin() o ros::spinOnce()
     ros::AsyncSpinner spinner(0);
     spinner.start();
 
-    ros::Duration(1.0).sleep();
+    //Espera dos segundos para que se publique el mapa
+    ros::Duration(2.0).sleep();
+
+
     while(ros::ok() && canReach && !isDestinyReached) {
 
-        ROS_INFO("entra al while");
-
+        //Se calcula la posicion del robot en celdas
         posMutex.lock();
         GridCell curr_pos = GridCell(current_pose);
         posMutex.unlock();
 
+        //Se calcula el camino
         astar(AStarCell(curr_pos.x, curr_pos.y, NULL), AStarCell(destiny_cell.x, destiny_cell.y, NULL));
 
+        //Se publica el camino
         pathPublication();
+
 
         pathMutex.lock();
 
+        //Mientras quede camino por recorrer
         if(path.size() > 2) {
-            ROS_INFO("hay path");
+
+            //Se calcula el siguiente punto del camino
             geometry_msgs::Pose2D tempGoal;
-            tempGoal.x = (path[pathIndex].cell_x - map_cell_zero_x)*resolution;
-            tempGoal.y = (path[pathIndex].cell_y - map_cell_zero_y)*resolution;
-            pathIndex += pathStepIndex;
+            tempGoal.x = (path[pathStepIndex].cell_x - map_cell_zero_x)*resolution;
+            tempGoal.y = (path[pathStepIndex].cell_y - map_cell_zero_y)*resolution;
 
             pathMutex.unlock();
 
-            ROS_INFO("goal_x, goal_y: %f, %f", tempGoal.x, tempGoal.y);
+            //Se mueve el robot
             moveStraight(tempGoal, rate);
         }else {
             pathMutex.unlock();
             isDestinyReached = true;
-        }
-        
+        }   
 
         rate.sleep();
     }
