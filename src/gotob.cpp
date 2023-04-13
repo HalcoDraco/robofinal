@@ -168,9 +168,8 @@ AStarCell aStarClosed[total_map_size];
 //Indice de la lista de celdas cerradas del algoritmo A*
 int aStarClosedSize = 0;
 
-//El mutex asegura que solo un hilo puede acceder al path a la vez
+//Los mutex se usan para que no se acceda a las variables desde dos hilos a la vez
 std::mutex pathMutex;
-
 std::mutex posMutex;
 
 //Mapa de ocupacion con paredes agrandadas
@@ -178,7 +177,9 @@ bool grid[total_map_size];
 
 //Lista de celdas que conforman el camino
 std::vector<AStarCell> path;
-int pathIndex = pathStepIndex;
+
+//Indice de la celda actual del camino, se suma uno porque la primera celda es la del robot
+int pathIndex = pathStepIndex + 1;
 
 //Indica si se ha encontrado un camino
 bool canReach = true;
@@ -186,9 +187,12 @@ bool canReach = true;
 //Indica si se ha llegado al destino
 bool isDestinyReached = false;
 
-//para visualizar, quitar para mejorar rendimiento
+//publishers para la visualizacion
 ros::Publisher map_pb;
 ros::Publisher path_pb;
+
+//publisher para el movimiento
+ros::Publisher vel_pb;
 
 //Convierte un indice de array a una celda de grid
 GridCell translate_arr_to_grid(int index) {
@@ -323,7 +327,7 @@ void setPath(AStarCell * end) {
     path.push_back(*end);
 }
 
-//Publica el mapa de ocupacion de paredes agrandadas
+//Publica el mapa de ocupacion de paredes agrandadas en el topic /big_wall_map
 void mapPublication() {
     nav_msgs::OccupancyGrid mp;
     std::vector<int8_t> v(grid, grid + total_map_size);
@@ -340,9 +344,11 @@ void mapPublication() {
     map_pb.publish(mp);
 }
 
+//Publica el camino encontrado en el topic /robot_path
 void pathPublication() {
     nav_msgs::Path pth;
 
+    //Se bloquea el mutex del path para evitar que se acceda mientras se esta publicando
     std::lock_guard<std::mutex> lock(pathMutex);
 
     for(int i = 0; i < path.size(); i++) {
@@ -352,6 +358,7 @@ void pathPublication() {
         pth.poses.push_back(positionStamped);
     }
 
+    //Necesario para la visualizacion en rviz
     pth.header.frame_id = "map";
     
     path_pb.publish(pth);
@@ -464,7 +471,7 @@ void astar(AStarCell start, AStarCell end) {
             path.clear();
 
             //el index 0 contiene la posicion del robot
-            pathIndex = pathStepIndex;
+            pathIndex = pathStepIndex + 1;
             setPath(current);
             pathMutex.unlock();
             break;
@@ -497,12 +504,13 @@ void astar(AStarCell start, AStarCell end) {
     }
 }
 
-/////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
+//Actualiza la posicion del robot cada vez que recibe un mensaje de odometria (funcion obtenida de la practica 7)
 void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
 
+    //Se bloquea el mutex para que no se acceda a la posicion del robot mientras se esta actualizando
     std::lock_guard<std::mutex> lock(posMutex);
 
+    //Actualiza x e y
     current_pose.x = msg->pose.pose.position.x;
     current_pose.y = msg->pose.pose.position.y;
 
@@ -515,29 +523,34 @@ void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
     tf::Matrix3x3 m(q);
     double roll, pitch, yaw;
     m.getRPY(roll, pitch, yaw);
+
+    //Actualiza theta
     current_pose.theta = yaw;
 }
 
+//Cada vez que recibe un mapa de ocupacion del nodo de slam gmapping, aumenta sus paredes, lo guarda y lo publica
 void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
+
+    //memset es una forma rapida de cambiar todos los valores de un array a un mismo valor, en este caso a 0 o false
     memset(grid, 0, sizeof(grid));
+
+    //Aumenta las paredes del mapa
     enlargeWalls(&(msg->data[0]));
    
     //mera visualizacion
     mapPublication();
 }
 
-//Publicar la velocidad lineal y angular
-ros::Publisher vel_pb;
 
-//Establecer velocidad lineal y angular iniciales
-geometry_msgs::Twist cmd_vel_msg;
-
-//Función para mover el robot en linea recta del punto incial (pose) al punto final (goal)
 void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
     
-    float acc_time = 1.0;
-    float linear_vel = 0.10 / acc_time;
-    float angular_vel = 0.60 / acc_time;
+    //Mensaje que se publicara en el topic cmd_vel
+    geometry_msgs::Twist cmd_vel_msg;
+
+
+    float acc_time = 0.5;
+    float linear_vel = 0.17 / acc_time;
+    float angular_vel = 0.80 / acc_time;
     float vel_mod;
 
     posMutex.lock();
@@ -687,7 +700,7 @@ int main(int argc, char **argv) {
     //Publisher de la velocidad
     vel_pb = nh.advertise<geometry_msgs::Twist>("cmd_vel", 100);
 
-    ros::Rate rate(50);
+    ros::Rate rate(60);
 
     //nh.setParam("/turtlebot3_slam_gmapping/map_update_interval", 2.0);
 
@@ -710,7 +723,7 @@ int main(int argc, char **argv) {
 
         pathMutex.lock();
 
-        if(path.size() != 0) {
+        if(path.size() > 2) {
             ROS_INFO("hay path");
             geometry_msgs::Pose2D tempGoal;
             tempGoal.x = (path[pathIndex].cell_x - map_cell_zero_x)*resolution;
@@ -723,6 +736,7 @@ int main(int argc, char **argv) {
             moveStraight(tempGoal, rate);
         }else {
             pathMutex.unlock();
+            isDestinyReached = true;
         }
         
 
