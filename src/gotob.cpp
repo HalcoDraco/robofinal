@@ -24,6 +24,7 @@ const int map_origin_y = -10; //m
 const int map_cell_zero_x = 200; //celda
 const int map_cell_zero_y = 200; //celda
 
+//Constantes del algoritmo A*
 const int ort_cost = 10; //Coste de movimiento ortogonal
 const int diag_cost = 14; //Coste de movimiento diagonal
 const float heuristic_weight = 2.0; //Peso de la heuristica
@@ -32,6 +33,14 @@ const float heuristic_weight = 2.0; //Peso de la heuristica
 const int robot_cell_diameter = 10; //celda
 
 const int pathStepIndex = 3;
+
+//Constantes de movimiento
+const float acc_time = 0.8;
+const float ang_dist_dec = PI/3;
+const float lin_dist_dec = 0.05;
+const float linear_vel = 0.14 / acc_time;
+const float angular_vel = 0.80 / acc_time;
+const float angle_precision = 0.05;
 
 
 //Celdas del mapa
@@ -577,13 +586,7 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
     //Mensaje que se publicara en el topic cmd_vel
     geometry_msgs::Twist cmd_vel_msg;
 
-    float acc_time = 0.8;
-    float ang_dist_dec = PI/3;
-    float lin_dist_dec = 0.05;
-    float linear_vel = 0.14 / acc_time;
-    float angular_vel = 0.80 / acc_time;
     float vel_mod;
-    float angle_precision = 0.05;
 
     //Se calcula el angulo que debe tener el robot
     float goal_angle = calculateGoalAngle(goal);
