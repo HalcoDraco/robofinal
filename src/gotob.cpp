@@ -560,6 +560,12 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
     float angle_dist = goal_angle - current_pose.theta;
     posMutex.unlock();
 
+    if(angle_dist > PI) {
+        angle_dist = angle_dist - 2*PI;
+    } else if(angle_dist < -PI) {
+        angle_dist = angle_dist + 2*PI;
+    }
+
     int dir;
 
     if(angle_dist >= 0) {
@@ -576,6 +582,12 @@ void moveStraight(geometry_msgs::Pose2D &goal, ros::Rate &rate) {
         posMutex.lock();
         angle_dist = goal_angle - current_pose.theta;
         posMutex.unlock();
+
+        if(angle_dist > PI) {
+            angle_dist = angle_dist - 2*PI;
+        } else if(angle_dist < -PI) {
+            angle_dist = angle_dist + 2*PI;
+        }
 
         //aceleracion
         actualTime = ros::Time::now().toSec();
