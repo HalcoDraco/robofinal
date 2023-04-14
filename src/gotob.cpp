@@ -733,7 +733,7 @@ int main(int argc, char **argv) {
         pathMutex.lock();
 
         //Mientras quede camino por recorrer
-        if(path.size() > 2) {
+        if(path.size() > pathStepIndex) {
 
             //Se calcula el siguiente punto del camino
             geometry_msgs::Pose2D tempGoal;
