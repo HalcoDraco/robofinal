@@ -180,6 +180,7 @@ int aStarClosedSize = 0;
 //Los mutex se usan para que no se acceda a las variables desde dos hilos a la vez
 std::mutex pathMutex;
 std::mutex posMutex;
+std::mutex gridMutex;
 
 //Mapa de ocupacion con paredes agrandadas
 bool grid[total_map_size];
@@ -250,7 +251,9 @@ void updateCircleInGrid(GridCell center) {
             //Si la celda esta dentro del circulo, se actualiza el mapa de ocupacion
             if(insideCircle(center, p)) {
                 int ind_p = translate_grid_to_arr(p);
+                gridMutex.lock();
                 grid[ind_p] = true;
+                gridMutex.unlock();
             }
         }
     }
@@ -297,6 +300,8 @@ void assignValidNeighbour(int temp_x, int temp_y, AStarCell &parent, std::vector
 
     AStarCell temp = AStarCell(temp_x, temp_y, &parent);
 
+    std::lock_guard<std::mutex> lock(gridMutex);
+
     //si la celda es valida, se añade a la lista de vecinos
     if(temp_x >= 0 && temp_x < map_side_lenght && temp_y >= 0 && temp_y < map_side_lenght && grid[translate_grid_to_arr(GridCell(temp_x, temp_y))] == false && temp.inArray(aStarClosed, aStarClosedSize) == false) {
         neighbours.push_back(AStarCell(temp_x, temp_y, &parent));
@@ -336,7 +341,11 @@ void setPath(AStarCell * end) {
 //Publica el mapa de ocupacion de paredes agrandadas en el topic /big_wall_map
 void mapPublication() {
     nav_msgs::OccupancyGrid mp;
+
+    gridMutex.lock();
     std::vector<int8_t> v(grid, grid + total_map_size);
+    gridMutex.unlock();
+
     for (int ind = 0; ind < total_map_size; ind++) {
         v[ind] = v[ind] * 100;
     }
@@ -375,7 +384,9 @@ void aStarVisualization(int x, int y) {
 
     const int intervalo_pub = 10;
 
+    gridMutex.lock();
     grid[translate_grid_to_arr(GridCell(x, y))] = true;
+    gridMutex.unlock();
 
     if(aStarClosedSize % intervalo_pub == 0){
         mapPublication();        
@@ -391,12 +402,14 @@ void findNearestFreeCell(std::vector<AStarCell> &open, AStarCell &start) {
     bool found = false;
     int i;
     while(!found) {
+        gridMutex.lock();
         for(i = 0; i < 8; i++) {
             if(grid[translate_grid_to_arr(GridCell(start.cell_x + dist*directions[i].x, start.cell_y + dist*directions[i].y))] == false) {
                 found = true;
                 break;
             }
         }
+        gridMutex.unlock();
         if(!found){
             dist++;
         }
@@ -418,11 +431,14 @@ void findNearestFreeCell(std::vector<AStarCell> &open, AStarCell &start) {
 
 void astar(AStarCell start, AStarCell end) {
 
+    gridMutex.lock();
     if(grid[translate_grid_to_arr(GridCell(end.cell_x, end.cell_y))] == true) {
+        gridMutex.unlock();
         ROS_INFO("No hay camino o el destino esta demasiado cerca de una pared");
         canReach = false;
         return;
     }
+    gridMutex.unlock();
 
     //Vector open, que contiene los nodos que se van a explorar (los de la frontera)
     std::vector<AStarCell> open;
@@ -430,10 +446,13 @@ void astar(AStarCell start, AStarCell end) {
     //Vaciar el vector de nodos cerrados
     aStarClosedSize = 0;
 
+    gridMutex.lock();
     if(grid[translate_grid_to_arr(GridCell(start.cell_x, start.cell_y))] == true) {
+        gridMutex.unlock();
         //Si el nodo inicial esta en una pared, se busca el nodo libre mas cercano
         findNearestFreeCell(open, start);
     }else {
+        gridMutex.unlock();
         //Se añade el nodo inicial a la lista de nodos a explorar
         open.push_back(start);
     }
@@ -535,8 +554,12 @@ void odomCallback(const nav_msgs::OdometryConstPtr& msg) {
 //Cada vez que recibe un mapa de ocupacion del nodo de slam gmapping, aumenta sus paredes, lo guarda y lo publica
 void mapCallBack(const nav_msgs::OccupancyGrid::ConstPtr& msg) {
 
+    gridMutex.lock();
+
     //memset es una forma rapida de cambiar todos los valores de un array a un mismo valor, en este caso a 0 o false
     memset(grid, 0, sizeof(grid));
+
+    gridMutex.unlock();
 
     //Aumenta las paredes del mapa
     enlargeWalls(&(msg->data[0]));
